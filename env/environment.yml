@@ -9,6 +9,7 @@ dependencies:
   - bokeh=3.6.0
   - scipy=1.13.1
   - pandas=2.2.2
+  - pytest=7.4.4
   - pip=23.2
   - pip:
     - nbconvert[webpdf]

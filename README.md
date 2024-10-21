@@ -19,7 +19,15 @@ regular latitude, longitude grids, where only grid centers are needed to fully d
 algorithms exist to do this mapping onto grid cells of any shape, as long as those volumes are convex 
 (e.g. [here](https://www.doc.ic.ac.uk/~dfg/graphics/graphics2008/GraphicsLecture04.pdf)).
 
+## Python Environment
+
 Aircraft mapper requires a number of packes to be installed. A conda environment file is provided in env/. To create
 this environment, run:
 
 `conda env create -f env/environment.yml`
+
+## Running Tests
+
+To run tests, run `pytest` **from within the test/ directory**. This will run all tests and report if something failed.
+
+
