@@ -1,0 +1,16 @@
+name: aircraft_mapper
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - jupyter=1.0.0
+  - netCDF4=1.6.4
+  - numpy=1.26.4
+  - bokeh=3.6.0
+  - scipy=1.13.1
+  - pandas=2.2.2
+  - pip=23.2
+  - pip:
+    - nbconvert[webpdf]
+    - metpy==1.5.1
+

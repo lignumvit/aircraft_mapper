@@ -18,3 +18,8 @@ often these products are conservativel regridded onto more user-friendly structu
 regular latitude, longitude grids, where only grid centers are needed to fully define the grid cell volumes. However,
 algorithms exist to do this mapping onto grid cells of any shape, as long as those volumes are convex 
 (e.g. [here](https://www.doc.ic.ac.uk/~dfg/graphics/graphics2008/GraphicsLecture04.pdf)).
+
+Aircraft mapper requires a number of packes to be installed. A conda environment file is provided in env/. To create
+this environment, run:
+
+`conda env create -f env/environment.yml`
