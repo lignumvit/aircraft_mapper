@@ -7,20 +7,31 @@ from datetime import datetime
 
 def test_open_nc():
     # test bad file path, check that FileNotFoundError results
-    file_path = "./test_fligt.nc"
+    file_path = "./test_fligt_25hz.nc"
     with pytest.raises(FileNotFoundError):
         utils.open_flight_nc(file_path)
 
     # now test where file exists
-    file_path = "./test_flight.nc"
+    file_path = "./test_flight_25hz.nc"
     assert utils.open_flight_nc(file_path)
     
 def test_read_nc():
-    file_path = "./test_flight.nc"
-    nc = utils.open_flight_nc(file_path)
-
     vars_to_read = ['Time','GGALT','LATC','LONC','UIC','VIC','WIC']
-    df = utils.read_flight_nc(nc, vars_to_read) # only tests that no errors were thrown, so not a great test
+
+    # open up the netcdf files
+    file_path_1hz = "./test_flight_1hz.nc"
+    file_path_25hz = "./test_flight_25hz.nc"
+    nc_1hz = utils.open_flight_nc(file_path_1hz)
+    nc_25hz = utils.open_flight_nc(file_path_25hz)
+
+    # test individual read functions for 1 hz and 25 hz files
+    #    only tests that no errors were thrown, so not the best test
+    df_1hz = utils.read_flight_nc_1hz(nc_1hz, vars_to_read)
+    df_25hz = utils.read_flight_nc_25hz(nc_25hz, vars_to_read)
+
+    # test the wrapper function that detects what sampling rate is contained and calls the appropriate read function
+    df = utils.read_flight_nc(nc_1hz, vars_to_read)
+    df = utils.read_flight_nc(nc_25hz, vars_to_read)
 
 def test_sfm_to_datetime():
     # a test array of sfm (seconds-from-midnight) with units of tunits

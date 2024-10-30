@@ -2,7 +2,10 @@ import netCDF4
 import pathlib as path
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime, timedelta
+from fnmatch import fnmatch
+from typing import Iterable
 
 # vars_to_read is the default set of variables that get read when calling read_nc below when
 # variables are not specified (i.e. when called like "utils.read_nc(netcdf_obj)"). 
@@ -11,7 +14,7 @@ vars_to_read = ['Time','GGALT','LATC','LONC', # 4-D Position
                 'ATX','PSFC','EWX',           # other state params
                ]
 
-def sfm_to_datetime(sfm, tunits: str) -> list[datetime]:
+def sfm_to_datetime(sfm: Iterable[float], tunits: str) -> list[datetime]:
     """
     sfm_to_datetime converts an iterable of seconds from midnight with units of tunits to a list
 
@@ -21,13 +24,24 @@ def sfm_to_datetime(sfm, tunits: str) -> list[datetime]:
     :return: Returns a list of Python datetimes.
     """
 
-    deltas = np.array([timedelta(seconds=s) for s in sfm])
+    deltas = np.array([timedelta(seconds=float(s)) for s in sfm])
     tunits_split = tunits.split(' ')
     t0_iso_str = tunits_split[2]+"T"+tunits_split[3]+tunits_split[4]
     t0_dt = datetime.fromisoformat(t0_iso_str)
     
     dts = [t0_dt + delta for delta in deltas]
     return dts
+
+def find_flight_fnames(dir_path: str) -> list[str]:
+    """
+    find_flight_fnames just searches a directory for all *.nc files and returns a list of them.
+
+    :param dir_path: a path to the directory containing flight netcdf files
+
+    :return: Returns a list of flight netcdf files.
+    """
+    flight_fnames = sorted([fname for fname in os.listdir(dir_path) if fnmatch(fname, "*.nc")])
+    return flight_fnames
 
 def open_flight_nc(file_path: str) -> netCDF4._netCDF4.Dataset:
     """
@@ -44,7 +58,7 @@ def open_flight_nc(file_path: str) -> netCDF4._netCDF4.Dataset:
 
     return netCDF4.Dataset(file_path)
 
-def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+def read_flight_nc_25hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
     """
     read_flight_nc reads a set of variables into memory.
 
@@ -55,7 +69,7 @@ def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_
                       list, vars_to_read, is specified above. Passing in a similar list will read in those variables
                       instead.
 
-    :return: Returns either a dictionary of numpy time series arrays or a single pandas data frame.
+    :return: Returns a pandas data frame.
     """
 
     data = [] # an empty list to accumulate Dataframes of each variable to be read in
@@ -96,7 +110,70 @@ def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_
                 raise RuntimeError(f"Variable {var} is {ndims}-dimensional. Only 1-D or 2-D variables are handled.")
               
 
-    # concatenate the list of dataframes into a single dataframe
-    data = pd.concat(data, axis=1, ignore_index=False)
+    # concatenate the list of dataframes into a single dataframe and return it
+    return pd.concat(data, axis=1, ignore_index=False)
 
-    return data
+def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+    """
+    read_flight_nc reads a set of variables into memory.
+
+    NOTE: a low-rate, 1 Hz, flight data file is assumed
+
+    :param nc: netCDF4._netCDF4.Dataset object opened by open_flight_nc.
+    :param read_vars: An optional list of strings of variable names to be read into memory. A default
+                      list, vars_to_read, is specified above. Passing in a similar list will read in those variables
+                      instead.
+
+    :return: Returns a pandas data frame.
+    """
+
+    data = [] # an empty list to accumulate Dataframes of each variable to be read in
+    for var in read_vars:
+        if var == "Time":
+            # time is provided every second, so need to calculate 25 Hz times efficiently
+            tunits = getattr(nc[var],'units')
+            time = nc[var][:]
+            data.append(pd.DataFrame({var: time}))
+            dt_list = sfm_to_datetime(time, tunits)
+            data.append(pd.DataFrame({'datetime': dt_list}))
+        else:
+            output = nc[var][:]
+            data.append(pd.DataFrame({var: output}))
+
+    # concatenate the list of dataframes into a single dataframe and return it
+    return pd.concat(data, axis=1, ignore_index=False)
+
+def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+    dim_names = list(nc.dimensions.keys())
+    if 'sps25' in dim_names:
+        df = read_flight_nc_25hz(nc, read_vars)
+    else:
+        df = read_flight_nc_1hz(nc, read_vars)
+    return df
+
+def open_all_flights(data_dir: str, 
+                     field_campaigns: list[str], 
+                     read_vars: list[str] = vars_to_read) -> dict[str,dict[str,pd.DataFrame]]:
+    all_campaign_nc = {} # a dictionary of dictionaries with keys of field campaigns
+    for campaign in field_campaigns:
+        print(campaign)
+        flight_dict = {} # a dictionary of Pandas DataFrames with keys of file names
+        campaign_dir = data_dir + "/" + campaign + "/lrt"
+        flight_fnames = find_flight_fnames(campaign_dir)
+        for fname in flight_fnames:
+            print(fname)
+            flight_nc = open_flight_nc(campaign_dir + "/" + fname)
+            flight_dict[fname] = read_flight_nc(flight_nc, read_vars)
+        all_campaign_nc[campaign] = flight_dict
+    return all_campaign_nc
+
+
+
+
+
+
+
+
+
+
+
