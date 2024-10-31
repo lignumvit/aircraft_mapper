@@ -18,15 +18,16 @@ def sfm_to_datetime(sfm: Iterable[float], tunits: str) -> list[datetime]:
     """
     sfm_to_datetime converts an iterable of seconds from midnight with units of tunits to a list
 
-    :param sfm: An iterable/array of times with units of seconds.
-    :param tunits: A string defining the units of sfm. Expected to be in the form of "seconds from YYYY-MM-DD HH:mm:SS +HHMM"
+    :param sfm: An iterable/array of times with units of seconds from UTC midnight
+    :param tunits: A string defining the units of sfm. Expected to be in the form of "seconds from YYYY-MM-DD 00:00:00 +0000"
 
     :return: Returns a list of Python datetimes.
     """
 
     deltas = np.array([timedelta(seconds=float(s)) for s in sfm])
     tunits_split = tunits.split(' ')
-    t0_iso_str = tunits_split[2]+"T"+tunits_split[3]+tunits_split[4]
+    #t0_iso_str = tunits_split[2]+"T"+tunits_split[3]+tunits_split[4]
+    t0_iso_str = tunits_split[2][0:10]+"T00:00:00+0000"
     t0_dt = datetime.fromisoformat(t0_iso_str)
     
     dts = [t0_dt + delta for delta in deltas]
@@ -144,6 +145,15 @@ def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars
     return pd.concat(data, axis=1, ignore_index=False)
 
 def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
+    """
+    read_flight_nc simply figures out if the flight netcdf object is 1 hz or 25 hz and calls the appropriate reader.
+
+    :param nc: A netcdf object for a flight netcdf file.
+    :param read_vars: A list of variable names to be read in the netcdf object. Optional. Default is "vars_to_read" specified
+                      above.
+
+    :return: Returns Pandas DataFrame
+    """
     dim_names = list(nc.dimensions.keys())
     if 'sps25' in dim_names:
         df = read_flight_nc_25hz(nc, read_vars)
@@ -151,9 +161,18 @@ def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_
         df = read_flight_nc_1hz(nc, read_vars)
     return df
 
-def open_all_flights(data_dir: str, 
+def read_all_flights(data_dir: str, 
                      field_campaigns: list[str], 
                      read_vars: list[str] = vars_to_read) -> dict[str,dict[str,pd.DataFrame]]:
+    """
+    open_all_flights 
+
+    :param nc: A netcdf object for a flight netcdf file.
+    :param read_vars: A list of variable names to be read in the netcdf object. Optional. Default is "vars_to_read" specified
+                      above.
+
+    :return: Returns Pandas DataFrame
+    """
     all_campaign_nc = {} # a dictionary of dictionaries with keys of field campaigns
     for campaign in field_campaigns:
         print(campaign)

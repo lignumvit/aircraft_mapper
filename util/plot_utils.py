@@ -55,8 +55,17 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]]):
     for campaign in all_campaign_dfs.keys():
         color=next(colors)
         for flight, df in all_campaign_dfs[campaign].items():
-            latitude = df["LATC"].to_numpy().squeeze()
-            longitude = df["LONC"].to_numpy().squeeze()
+            #latitude = df["LATC"].to_numpy().squeeze()
+            #longitude = df["LONC"].to_numpy().squeeze()
+            latitude = df["GGLAT"].to_numpy().squeeze()
+            longitude = df["GGLON"].to_numpy().squeeze()
+            if np.any(longitude > 175) and np.any(longitude < 175):
+                num_pos = np.sum(longitude > 0)
+                num_neg = np.sum(longitude < 0)
+                if num_pos >= num_neg:
+                    longitude = np.where(longitude < 0, longitude + 360, longitude)
+                else:
+                    longitude = np.where(longitude > 0, longitude - 360, longitude)
             k = 6378137
             longitude = longitude * (k * np.pi/180.0)
             latitude = np.log(np.tan((90 + latitude) * np.pi/360.0)) * k
@@ -64,6 +73,8 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]]):
             plot.line(longitude,latitude, color=color, legend_label=campaign)
 
     #plot.add_tile("Esri World Imagery", retina=True)
+    #plot.legend.location = 'right'
+    plot.legend.click_policy = 'hide'
     plot.add_tile("CartoDB Positron", retina=True)
 
     show(plot)
