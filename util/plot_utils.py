@@ -42,11 +42,11 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
     except Exception as e:
         print(e)
 
-def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show: bool = True):
+def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot: bool = True):
 
     campaign = list(all_campaign_dfs.keys())[0]
 
-    plot = figure(width=900, height=600, x_axis_type="mercator", y_axis_type="mercator") 
+    plot = figure(width=1000, height=600, x_axis_type="mercator", y_axis_type="mercator") 
     plot.add_layout(Title(text="Longitude [Degrees]", align="center"), "below")
     plot.add_layout(Title(text="Latitude [Degrees]", align="center"), "left")
 
@@ -55,10 +55,12 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show: boo
     for campaign in all_campaign_dfs.keys():
         color=next(colors)
         for flight, df in all_campaign_dfs[campaign].items():
-            #latitude = df["LATC"].to_numpy().squeeze()
-            #longitude = df["LONC"].to_numpy().squeeze()
-            latitude = df["GGLAT"].to_numpy().squeeze()
-            longitude = df["GGLON"].to_numpy().squeeze()
+            if "LATC" in list(df.keys()):
+                latitude = df["LATC"].to_numpy().squeeze()
+                longitude = df["LONC"].to_numpy().squeeze()
+            elif "GGLAT" in list(df.keys()):
+                latitude = df["GGLAT"].to_numpy().squeeze()
+                longitude = df["GGLON"].to_numpy().squeeze()
             if np.any(longitude > 175) and np.any(longitude < 175):
                 num_pos = np.sum(longitude > 0)
                 num_neg = np.sum(longitude < 0)
@@ -75,9 +77,12 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show: boo
     #plot.add_tile("Esri World Imagery", retina=True)
     #plot.legend.location = 'right'
     plot.legend.click_policy = 'hide'
+    plot.legend.label_text_font_size = '10px'
+    plot.legend.ncols = 2
     plot.add_tile("CartoDB Positron", retina=True)
+    plot.add_layout(plot.legend[0],'right')
 
-    if show:
+    if show_plot:
         show(plot)
     else:
         return plot
