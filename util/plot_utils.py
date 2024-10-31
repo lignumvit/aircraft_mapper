@@ -42,7 +42,7 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
     except Exception as e:
         print(e)
 
-def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]]):
+def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show: bool = True):
 
     campaign = list(all_campaign_dfs.keys())[0]
 
@@ -77,4 +77,7 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]]):
     plot.legend.click_policy = 'hide'
     plot.add_tile("CartoDB Positron", retina=True)
 
-    show(plot)
+    if show:
+        show(plot)
+    else:
+        return plot
