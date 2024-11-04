@@ -111,7 +111,8 @@ def read_flight_nc_25hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = var
                 else:
                     raise RuntimeError(f"Variable {var} is {ndims}-dimensional. Only 1-D or 2-D variables are handled.")
         except Exception as e:
-            print(f"Issue reading {var}: {e}")
+            #print(f"Issue reading {var}: {e}")
+            pass
               
 
     # concatenate the list of dataframes into a single dataframe and return it
@@ -145,7 +146,8 @@ def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars
                 output = nc[var][:]
                 data.append(pd.DataFrame({var: output}))
         except Exception as e:
-            print(f"Issue reading {var}: {e}")
+            #print(f"Issue reading {var}: {e}")
+            pass
     
 
     # concatenate the list of dataframes into a single dataframe and return it
