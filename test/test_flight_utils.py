@@ -1,6 +1,6 @@
 import sys
 sys.path.append('..')
-import util.utils as utils
+import util.flight_utils as utils
 import pytest
 import numpy as np
 from datetime import datetime

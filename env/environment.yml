@@ -19,6 +19,5 @@ dependencies:
   - xarray=2024.10.0
   - matplotlib=3.9.2
   - pip=23.2
-  - pip:
-    - nbconvert[webpdf]
-    - metpy==1.5.1
+  - metpy==1.6.3
+  - nbconvert=7.16.4
