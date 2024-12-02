@@ -196,12 +196,38 @@ def read_all_flights(data_dir: str,
     return all_campaign_nc
 
 
+class flight_obj:
+    """
+    flight_obj's are classes that hold flight data (i.e. variables indicated by read_vars) from a provided file path string.
+    The __init__ takes a file path string and a list of vars to read (vars_to_read by default).
+    The __init__ assigns:
+    self.file_path: str; the file path passed in
+    self.read_vars_attempted: list[str]; the originally passed in list of vars to read
+    self.nc: netCDF4._netCDF4.Dataset; the opened netcdf object
+    self.df: pd.DataFrame; a dataframe holding the read in data
+    self.rate: str; a string indicating the rate of the data read in
+    self.read_vars: list[str]; list of the vars that were successfully read in
+    """
+    def __init__(self, file_path: str, read_vars: list[str] = vars_to_read):
+        # assign input vars
+        self.file_path = path.Path(file_path)
+        self.read_vars_attempted = read_vars
 
+        # open netcdf file if the file exists, assign to self.nc
+        if self.file_path.is_file():
+            self.nc = netCDF4.Dataset(self.file_path)
+        else:
+            raise FileNotFoundError(f"File {self.file_path} did not exist!")
 
-
-
-
-
-
-
+        # read in the variables, assign DataFrame to self.df,
+        #                               rate to self.rate,
+        #                               vars read in to self.read_vars
+        dim_names = list(self.nc.dimensions.keys())
+        if 'sps25' in dim_names:
+            self.df = read_flight_nc_25hz(self.nc, self.read_vars_attempted)
+            self.rate = "25Hz"
+        else:
+            self.df = read_flight_nc_1hz(self.nc, self.read_vars_attempted)
+            self.rate = "1Hz"
+        self.read_vars = list(self.df.keys())
 

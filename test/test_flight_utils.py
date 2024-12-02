@@ -49,5 +49,29 @@ def test_sfm_to_datetime():
     for (test, expected) in zip(dt_list, expected_list):
         assert test == expected
 
+def test_flight_obj():
+    # test bad file path, check that FileNotFoundError results
+    file_path = "./test_fligt_25hz.nc"
+    with pytest.raises(FileNotFoundError):
+        flight_obj = utils.flight_obj(file_path)
+
+    # set up a test to read in flight data. try to read in GGLAT, GGLON despite not in file
+    read_vars = ['Time','GGALT','LATC','LONC','GGLAT','GGLON',
+                                'UIC','VIC','WIC',]
+    file_path = "./test_flight_25hz.nc"
+    # create the flight object
+    flight_obj = utils.flight_obj(file_path, read_vars)
+    # read_vars_attempted should equal the read vars sent in
+    assert flight_obj.read_vars_attempted == read_vars
+    # test that GGLAT and GGLON were not actually read
+    assert not 'GGLAT' in flight_obj.read_vars
+    assert not 'GGLON' in flight_obj.read_vars  
+    assert flight_obj.rate == "25Hz"
+
+    # test that 1Hz is detected
+    file_path = "./test_flight_1hz.nc"
+    assert utils.flight_obj(file_path, read_vars).rate == "1Hz"
+
+
 if __name__ == "__main__":
-    test_read_nc()
+    test_flight_obj()
