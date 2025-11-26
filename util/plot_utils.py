@@ -90,6 +90,8 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot
 
     plot.legend.click_policy = 'hide'
     plot.legend.label_text_font_size = '10px'
+    plot.legend.glyph_height = 16
+    plot.legend.label_height = 16
     plot.legend.ncols = 2
     plot.add_tile("CartoDB Positron", retina=True)
     plot.add_layout(plot.legend[0],'right')
