@@ -172,16 +172,31 @@ def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_
 
 def read_all_flights(data_dir: str, 
                      field_campaigns: list[str], 
-                     read_vars: list[str] = vars_to_read) -> dict[str,dict[str,pd.DataFrame]]:
+                     read_vars: list[str] = vars_to_read,
+                     skip_n_points: int = 0) -> dict[str,dict[str,pd.DataFrame]]:
     """
-    open_all_flights 
+    read_all_flights reads the requested variables from every flight of every requested
+    field campaign.
 
-    :param nc: A netcdf object for a flight netcdf file.
+    :param data_dir: Path to the directory holding one subdirectory per field campaign.
+    :param field_campaigns: A list of field campaign names, each expected to have a "lrt"
+                            subdirectory of flight netcdf files under data_dir.
     :param read_vars: A list of variable names to be read in the netcdf object. Optional. Default is "vars_to_read" specified
                       above.
+    :param skip_n_points: Number of samples to skip between the samples that are kept, so
+                          0 (the default) keeps every sample, 1 keeps every other one, 9
+                          keeps every tenth, and so on. Low-rate files are 1 Hz, so
+                          skip_n_points = 9 thins them to 0.1 Hz. Thinning here rather
+                          than at plot time keeps the data out of memory entirely, and
+                          keeps it out of the figures bokeh embeds in the notebook.
 
-    :return: Returns Pandas DataFrame
+    :return: Returns a dictionary of dictionaries of Pandas DataFrames, keyed by field
+             campaign and then by flight file name.
     """
+    if skip_n_points < 0:
+        raise ValueError(f"skip_n_points must be >= 0, got {skip_n_points}")
+    stride = skip_n_points + 1
+
     all_campaign_nc = {} # a dictionary of dictionaries with keys of field campaigns
     for campaign in field_campaigns:
         print(campaign)
@@ -191,7 +206,12 @@ def read_all_flights(data_dir: str,
         for fname in flight_fnames:
             #print(fname)
             flight_nc = open_flight_nc(campaign_dir + "/" + fname)
-            flight_dict[fname] = read_flight_nc(flight_nc, read_vars)
+            df = read_flight_nc(flight_nc, read_vars)
+            if stride > 1:
+                # reset the index so the thinned frame looks like a natively lower-rate
+                # read rather than one with gaps in its index
+                df = df.iloc[::stride].reset_index(drop=True)
+            flight_dict[fname] = df
         all_campaign_nc[campaign] = flight_dict
     return all_campaign_nc
 
