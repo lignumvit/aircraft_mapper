@@ -384,7 +384,7 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
         print(e)
 
 def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot: bool = True,
-                   wrap_longitude: float = 65.0,
+                   wrap_longitude: float = 50.0,
                    projection: str = 'equirectangular',
                    width: int = 1000, height: int = 450):
 
@@ -441,6 +441,16 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot
             elif "LATC" in list(df.keys()):
                 latitude = df["LATC"].to_numpy().squeeze()
                 longitude = df["LONC"].to_numpy().squeeze()
+            elif "GLAT" in list(df.keys()):
+                # campaigns from the 1990s (e.g. INDOEX, 1999) name the GPS position
+                # GLAT/GLON rather than GGLAT/GGLON
+                latitude = df["GLAT"].to_numpy().squeeze()
+                longitude = df["GLON"].to_numpy().squeeze()
+            else:
+                # Without this, latitude/longitude would still hold the previous flight's
+                # arrays and that track would quietly be drawn a second time.
+                print(f"  skipping {campaign}/{flight}: no position variables were read")
+                continue
             #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
             if campaign == "ARISTO2017":
                 mask = np.argwhere(latitude < 20)
@@ -532,6 +542,16 @@ def plot_campaigns_custom(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], sh
             elif "LATC" in list(df.keys()):
                 latitude = df["LATC"].to_numpy().squeeze()
                 longitude = df["LONC"].to_numpy().squeeze()
+            elif "GLAT" in list(df.keys()):
+                # campaigns from the 1990s (e.g. INDOEX, 1999) name the GPS position
+                # GLAT/GLON rather than GGLAT/GGLON
+                latitude = df["GLAT"].to_numpy().squeeze()
+                longitude = df["GLON"].to_numpy().squeeze()
+            else:
+                # Without this, latitude/longitude would still hold the previous flight's
+                # arrays and that track would quietly be drawn a second time.
+                print(f"  skipping {campaign}/{flight}: no position variables were read")
+                continue
             #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
             if campaign == "ARISTO2017":
                 mask = np.argwhere(latitude < 20)
