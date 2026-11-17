@@ -446,11 +446,23 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot
                 # GLAT/GLON rather than GGLAT/GGLON
                 latitude = df["GLAT"].to_numpy().squeeze()
                 longitude = df["GLON"].to_numpy().squeeze()
+            elif "LAT" in list(df.keys()):
+                # inertial (IRU) position, for campaigns whose GPS position is unreliable
+                # (e.g. FIB, 1992)
+                latitude = df["LAT"].to_numpy().squeeze()
+                longitude = df["LON"].to_numpy().squeeze()
             else:
                 # Without this, latitude/longitude would still hold the previous flight's
                 # arrays and that track would quietly be drawn a second time.
                 print(f"  skipping {campaign}/{flight}: no position variables were read")
                 continue
+            # Drop positions of exactly (0, 0): older files record GPS/INS dropouts and
+            # periods after the data system stopped (e.g. SHEBA RF04's last 6 h) as zeros
+            # rather than as missing values, which would draw lines to the Gulf of Guinea.
+            null_island = (latitude == 0) & (longitude == 0)
+            if null_island.any():
+                latitude = latitude[~null_island]
+                longitude = longitude[~null_island]
             #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
             if campaign == "ARISTO2017":
                 mask = np.argwhere(latitude < 20)
@@ -466,9 +478,9 @@ def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot
             plot.line(longitude,latitude, color=color, legend_label=campaign)
 
     plot.legend.click_policy = 'hide'
-    plot.legend.label_text_font_size = '10px'
-    plot.legend.glyph_height = 12
-    plot.legend.label_height = 12
+    plot.legend.label_text_font_size = '7px'
+    plot.legend.glyph_height = 8
+    plot.legend.label_height = 8
     plot.legend.ncols = 2
     add_basemap(plot, projection=projection, wrap_longitude=wrap_longitude)
     plot.add_layout(plot.legend[0],'right')
@@ -547,11 +559,23 @@ def plot_campaigns_custom(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], sh
                 # GLAT/GLON rather than GGLAT/GGLON
                 latitude = df["GLAT"].to_numpy().squeeze()
                 longitude = df["GLON"].to_numpy().squeeze()
+            elif "LAT" in list(df.keys()):
+                # inertial (IRU) position, for campaigns whose GPS position is unreliable
+                # (e.g. FIB, 1992)
+                latitude = df["LAT"].to_numpy().squeeze()
+                longitude = df["LON"].to_numpy().squeeze()
             else:
                 # Without this, latitude/longitude would still hold the previous flight's
                 # arrays and that track would quietly be drawn a second time.
                 print(f"  skipping {campaign}/{flight}: no position variables were read")
                 continue
+            # Drop positions of exactly (0, 0): older files record GPS/INS dropouts and
+            # periods after the data system stopped (e.g. SHEBA RF04's last 6 h) as zeros
+            # rather than as missing values, which would draw lines to the Gulf of Guinea.
+            null_island = (latitude == 0) & (longitude == 0)
+            if null_island.any():
+                latitude = latitude[~null_island]
+                longitude = longitude[~null_island]
             #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
             if campaign == "ARISTO2017":
                 mask = np.argwhere(latitude < 20)

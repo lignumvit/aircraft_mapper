@@ -21,3 +21,4 @@ dependencies:
   - pip=23.2
   - metpy==1.6.3
   - nbconvert=7.16.4
+  - ipykernel

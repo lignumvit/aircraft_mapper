@@ -35,13 +35,14 @@ def sfm_to_datetime(sfm: Iterable[float], tunits: str) -> list[datetime]:
 
 def find_flight_fnames(dir_path: str) -> list[str]:
     """
-    find_flight_fnames just searches a directory for all *.nc files and returns a list of them.
+    find_flight_fnames just searches a directory for all *.nc and *.cdf files (older campaigns,
+    e.g. SHEBA and ACE-Asia, use .cdf) and returns a list of them.
 
     :param dir_path: a path to the directory containing flight netcdf files
 
     :return: Returns a list of flight netcdf files.
     """
-    flight_fnames = sorted([fname for fname in os.listdir(dir_path) if fnmatch(fname, "*.nc")])
+    flight_fnames = sorted([fname for fname in os.listdir(dir_path) if fnmatch(fname, "*.nc") or fnmatch(fname, "*.cdf")])
     return flight_fnames
 
 def open_flight_nc(file_path: str) -> netCDF4._netCDF4.Dataset:
@@ -58,6 +59,42 @@ def open_flight_nc(file_path: str) -> netCDF4._netCDF4.Dataset:
         raise FileNotFoundError('testing excptions')
 
     return netCDF4.Dataset(file_path)
+
+def is_longitude(var: netCDF4._netCDF4.Variable) -> bool:
+    """
+    is_longitude guesses whether a flight variable holds longitude (GLON, GGLON, LONC, XLONC, ...),
+    from its name or long_name.
+    """
+    long_name = getattr(var, 'long_name', '')
+    return 'LON' in var.name.upper() or 'longitude' in str(long_name).lower()
+
+def interp_1hz_to_25hz(var: netCDF4._netCDF4.Variable, sub_seconds: np.ndarray) -> np.ndarray:
+    """
+    interp_1hz_to_25hz linearly interpolates a 1-D, 1 Hz variable onto the 25 Hz time base of a
+    high-rate file, returning a 1-D array of length len(var) * len(sub_seconds). The final
+    second, which has no following sample to interpolate toward, is left as NaN.
+
+    Missing (masked) samples become NaN, so a data gap stays a gap. Interpolating straight
+    through the masked values instead produced false ramps and (0, 0) positions.
+
+    Longitude is interpolated the short way around: a step from 179.9 to -179.9 is treated as
+    +0.2 deg, not -359.8 deg. Interpolating straight across the dateline otherwise sweeps
+    through every longitude within one second, which draws a line across the whole map.
+
+    :param var: A 1-D netCDF variable sampled once per second.
+    :param sub_seconds: Fractions of a second at which to interpolate, e.g. np.arange(25)/25.
+
+    :return: Returns a 1-D numpy array of floats.
+    """
+    values = np.ma.filled(np.ma.asarray(var[:], dtype=float), np.nan)
+    steps = np.diff(values)
+    if is_longitude(var):
+        steps = (steps + 180.0) % 360.0 - 180.0  # shortest way around
+    output_2d = np.full((len(values), len(sub_seconds)), np.nan)
+    output_2d[:-1, :] = values[:-1, None] + sub_seconds[None, :] * steps[:, None]  # divide by 1s omitted
+    if is_longitude(var):
+        output_2d = (output_2d + 180.0) % 360.0 - 180.0  # back into [-180, 180)
+    return np.ravel(output_2d)
 
 def read_flight_nc_25hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
     """
@@ -102,11 +139,7 @@ def read_flight_nc_25hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = var
                     # 1-D variables in 25 Hz data files exist (e.g. GGALT is sampled at 20 Hz, but by default,
                     # this is filtered to 1Hz instead of fudged to 25 Hz). Do interpolation to 25 Hz so all time series
                     # have same length.
-                    output_1d = nc[var][:]
-                    output_2d = np.zeros((len(output_1d),hz))*float("NaN")
-                    for i in range(len(output_1d)-1):
-                        output_2d[i,:] = output_1d[i] + sub_seconds*(output_1d[i+1]-output_1d[i]) # divide by 1s omitted
-                    output = np.ravel(output_2d)
+                    output = interp_1hz_to_25hz(nc[var], sub_seconds)
                     data.append(pd.DataFrame({var: output}))
                 else:
                     raise RuntimeError(f"Variable {var} is {ndims}-dimensional. Only 1-D or 2-D variables are handled.")
@@ -115,7 +148,10 @@ def read_flight_nc_25hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = var
             pass
               
 
-    # concatenate the list of dataframes into a single dataframe and return it
+    # concatenate the list of dataframes into a single dataframe and return it. A file
+    # holding none of read_vars gives an empty DataFrame rather than a concat error.
+    if not data:
+        return pd.DataFrame()
     return pd.concat(data, axis=1, ignore_index=False)
 
 def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
@@ -150,7 +186,10 @@ def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars
             pass
     
 
-    # concatenate the list of dataframes into a single dataframe and return it
+    # concatenate the list of dataframes into a single dataframe and return it. A file
+    # holding none of read_vars gives an empty DataFrame rather than a concat error.
+    if not data:
+        return pd.DataFrame()
     return pd.concat(data, axis=1, ignore_index=False)
 
 def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_read) -> pd.DataFrame:
@@ -170,10 +209,29 @@ def read_flight_nc(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars_to_
         df = read_flight_nc_1hz(nc, read_vars)
     return df
 
+def thinning_stride(nc: netCDF4._netCDF4.Dataset, df: pd.DataFrame, period_s: float) -> int:
+    """
+    thinning_stride returns the row stride that keeps one row of df every period_s seconds.
+
+    RAF files have one Time entry per second, so rows per second is len(df) divided by the
+    length of the Time dimension: 1 for low-rate files, 25 for 25 Hz files (whose 1 Hz
+    variables are interpolated up to 25 Hz on reading), and so on for any other rate.
+
+    :param nc: The netCDF4 Dataset df was read from.
+    :param df: The DataFrame read from nc.
+    :param period_s: Seconds between kept samples. 0 keeps every row.
+
+    :return: Returns the stride, an int >= 1.
+    """
+    if period_s <= 0 or len(df) == 0 or 'Time' not in nc.dimensions:
+        return 1
+    rows_per_second = len(df) / len(nc.dimensions['Time'])
+    return max(1, round(period_s * rows_per_second))
+
 def read_all_flights(data_dir: str, 
                      field_campaigns: list[str], 
                      read_vars: list[str] = vars_to_read,
-                     skip_n_points: int = 0) -> dict[str,dict[str,pd.DataFrame]]:
+                     period_s: float = 0) -> dict[str,dict[str,pd.DataFrame]]:
     """
     read_all_flights reads the requested variables from every flight of every requested
     field campaign.
@@ -183,30 +241,65 @@ def read_all_flights(data_dir: str,
                             subdirectory of flight netcdf files under data_dir.
     :param read_vars: A list of variable names to be read in the netcdf object. Optional. Default is "vars_to_read" specified
                       above.
-    :param skip_n_points: Number of samples to skip between the samples that are kept, so
-                          0 (the default) keeps every sample, 1 keeps every other one, 9
-                          keeps every tenth, and so on. Low-rate files are 1 Hz, so
-                          skip_n_points = 9 thins them to 0.1 Hz. Thinning here rather
-                          than at plot time keeps the data out of memory entirely, and
-                          keeps it out of the figures bokeh embeds in the notebook.
+    :param period_s: Keep one sample every period_s seconds, whatever the file's sampling
+                     rate: period_s = 20 keeps every 20th row of a 1 Hz file and every 500th
+                     row of a 25 Hz file. 0 (the default) keeps every sample. Thinning here
+                     rather than at plot time keeps the data out of memory, and out of the
+                     figures bokeh embeds in the notebook.
 
     :return: Returns a dictionary of dictionaries of Pandas DataFrames, keyed by field
              campaign and then by flight file name.
     """
-    if skip_n_points < 0:
-        raise ValueError(f"skip_n_points must be >= 0, got {skip_n_points}")
-    stride = skip_n_points + 1
+    campaign_dirs = {campaign: data_dir + "/" + campaign + "/lrt" for campaign in field_campaigns}
+    return read_all_flights_from_dirs(campaign_dirs, read_vars, period_s)
+
+def read_all_flights_from_dirs(campaign_dirs: dict[str,str],
+                               read_vars: list[str] = vars_to_read,
+                               period_s: float = 0,
+                               skip_missing: bool = False,
+                               campaign_vars: dict[str,list[str]] = None) -> dict[str,dict[str,pd.DataFrame]]:
+    """
+    read_all_flights_from_dirs is read_all_flights for when each campaign's flight files live
+    in their own, arbitrarily laid-out directory (e.g. the EOL archive on glade, where the
+    path differs by aircraft and by data version).
+
+    :param campaign_dirs: A dictionary mapping field campaign name (used as the legend label)
+                          to the directory holding that campaign's flight netcdf files.
+                          Campaigns are read in the dictionary's order.
+    :param read_vars: A list of variable names to be read in the netcdf object.
+    :param period_s: See read_all_flights.
+    :param skip_missing: If True, a campaign whose directory is missing, unreadable, or holds
+                         no *.nc files is reported and skipped instead of raising.
+    :param campaign_vars: Optional per-campaign override of read_vars, keyed by campaign name,
+                          for campaigns whose usual position variables are unreliable (e.g.
+                          {'FIB': ['LAT','LON']} to read the inertial position).
+
+    :return: Returns a dictionary of dictionaries of Pandas DataFrames, keyed by field
+             campaign and then by flight file name.
+    """
+    if period_s < 0:
+        raise ValueError(f"period_s must be >= 0, got {period_s}")
 
     all_campaign_nc = {} # a dictionary of dictionaries with keys of field campaigns
-    for campaign in field_campaigns:
+    for campaign, campaign_dir in campaign_dirs.items():
         print(campaign)
+        campaign_read_vars = (campaign_vars or {}).get(campaign, read_vars)
         flight_dict = {} # a dictionary of Pandas DataFrames with keys of file names
-        campaign_dir = data_dir + "/" + campaign + "/lrt"
-        flight_fnames = find_flight_fnames(campaign_dir)
+        try:
+            flight_fnames = find_flight_fnames(campaign_dir)
+        except OSError as e:
+            if not skip_missing:
+                raise
+            print(f"  skipping {campaign}: cannot read {campaign_dir} ({e.strerror})")
+            continue
+        if not flight_fnames and skip_missing:
+            print(f"  skipping {campaign}: no *.nc files in {campaign_dir}")
+            continue
         for fname in flight_fnames:
             #print(fname)
             flight_nc = open_flight_nc(campaign_dir + "/" + fname)
-            df = read_flight_nc(flight_nc, read_vars)
+            df = read_flight_nc(flight_nc, campaign_read_vars)
+            stride = thinning_stride(flight_nc, df, period_s)
             if stride > 1:
                 # reset the index so the thinned frame looks like a natively lower-rate
                 # read rather than one with gaps in its index
