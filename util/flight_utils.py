@@ -3,6 +3,7 @@ import pathlib as path
 import pandas as pd
 import numpy as np
 import os
+import glob
 from datetime import datetime, timedelta
 from fnmatch import fnmatch
 from typing import Iterable
@@ -44,6 +45,28 @@ def find_flight_fnames(dir_path: str) -> list[str]:
     """
     flight_fnames = sorted([fname for fname in os.listdir(dir_path) if fnmatch(fname, "*.nc") or fnmatch(fname, "*.cdf")])
     return flight_fnames
+
+def find_flight_paths(location) -> list[str]:
+    """
+    find_flight_paths lists the flight netcdf files that make up one field campaign.
+
+    :param location: a directory of flight netcdf files, a glob pattern matching flight files
+                     (e.g. ".../HRT/NetCDF/RF*", to leave out preflight or ferry files), or a
+                     list of either, for campaigns whose flights are split over several
+                     directories (several aircraft, or LRT and HRT holding different flights).
+
+    :return: Returns a list of file paths, directory by directory in the order given.
+             A missing or unreadable directory raises OSError.
+    """
+    locations = [location] if isinstance(location, (str, os.PathLike)) else list(location)
+    paths = []
+    for loc in map(str, locations):
+        if any(c in loc for c in '*?['):
+            paths.extend(sorted(p for p in glob.glob(loc)
+                                if fnmatch(p, "*.nc") or fnmatch(p, "*.cdf")))
+        else:
+            paths.extend(os.path.join(loc, fname) for fname in find_flight_fnames(loc))
+    return paths
 
 def open_flight_nc(file_path: str) -> netCDF4._netCDF4.Dataset:
     """
@@ -180,11 +203,16 @@ def read_flight_nc_1hz(nc: netCDF4._netCDF4.Dataset, read_vars: list[str] = vars
                 data.append(pd.DataFrame({'datetime': dt_list}))
             else:
                 output = nc[var][:]
+                if np.ndim(output) == 2:
+                    # Some older files (1970s-80s GENPRO conversions) store even position
+                    # at several samples per second, as (Time, spsN). Keep each second's
+                    # first sample so every variable has one value per Time.
+                    output = output[:, 0]
                 data.append(pd.DataFrame({var: output}))
         except Exception as e:
             #print(f"Issue reading {var}: {e}")
             pass
-    
+
 
     # concatenate the list of dataframes into a single dataframe and return it. A file
     # holding none of read_vars gives an empty DataFrame rather than a concat error.
@@ -264,8 +292,10 @@ def read_all_flights_from_dirs(campaign_dirs: dict[str,str],
     path differs by aircraft and by data version).
 
     :param campaign_dirs: A dictionary mapping field campaign name (used as the legend label)
-                          to the directory holding that campaign's flight netcdf files.
-                          Campaigns are read in the dictionary's order.
+                          to the directory holding that campaign's flight netcdf files, or
+                          to anything else find_flight_paths accepts (a glob pattern, or a
+                          list of directories/patterns). Campaigns are read in the
+                          dictionary's order.
     :param read_vars: A list of variable names to be read in the netcdf object.
     :param period_s: See read_all_flights.
     :param skip_missing: If True, a campaign whose directory is missing, unreadable, or holds
@@ -286,25 +316,28 @@ def read_all_flights_from_dirs(campaign_dirs: dict[str,str],
         campaign_read_vars = (campaign_vars or {}).get(campaign, read_vars)
         flight_dict = {} # a dictionary of Pandas DataFrames with keys of file names
         try:
-            flight_fnames = find_flight_fnames(campaign_dir)
+            flight_paths = find_flight_paths(campaign_dir)
         except OSError as e:
             if not skip_missing:
                 raise
-            print(f"  skipping {campaign}: cannot read {campaign_dir} ({e.strerror})")
+            print(f"  skipping {campaign}: cannot read {e.filename or campaign_dir} ({e.strerror})")
             continue
-        if not flight_fnames and skip_missing:
+        if not flight_paths and skip_missing:
             print(f"  skipping {campaign}: no *.nc files in {campaign_dir}")
             continue
-        for fname in flight_fnames:
-            #print(fname)
-            flight_nc = open_flight_nc(campaign_dir + "/" + fname)
+        for flight_path in flight_paths:
+            flight_nc = open_flight_nc(flight_path)
             df = read_flight_nc(flight_nc, campaign_read_vars)
             stride = thinning_stride(flight_nc, df, period_s)
+            flight_nc.close()
             if stride > 1:
                 # reset the index so the thinned frame looks like a natively lower-rate
                 # read rather than one with gaps in its index
                 df = df.iloc[::stride].reset_index(drop=True)
-            flight_dict[fname] = df
+            # Key by file name. Flights of a campaign spread over several directories
+            # (e.g. one per aircraft) can share a file name, so fall back to the full path.
+            fname = os.path.basename(flight_path)
+            flight_dict[flight_path if fname in flight_dict else fname] = df
         all_campaign_nc[campaign] = flight_dict
     return all_campaign_nc
 

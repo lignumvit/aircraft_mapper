@@ -347,6 +347,226 @@ def add_basemap(plot, projection: str = 'equirectangular', wrap_longitude: float
                          wrap_longitude=wrap_longitude) if graticule else None
     return land, outlines, grid
 
+# Position variable pairs, best first. The names changed over RAF's history:
+#   GGLAT/GGLON  GPS (2000s on)
+#   LATC/LONC    GPS-corrected inertial position (1990s on)
+#   XLATC/XLONC  GPS-corrected inertial position (some 1990s projects)
+#   GLAT/GLON    GPS (from ~1990; patchy in the early years)
+#   LAT/LON      inertial position (1990s), or the only position in 1970s-early 80s data
+#   ALAT/ALON    inertial position (1980s)
+#   CLAT/CLON    LORAN-C position (1980s)
+POSITION_VARS = (('GGLAT', 'GGLON'), ('LATC', 'LONC'), ('XLATC', 'XLONC'), ('GLAT', 'GLON'),
+                 ('LAT', 'LON'), ('ALAT', 'ALON'), ('CLAT', 'CLON'))
+
+def _drop_jumps(lat: np.ndarray, lon: np.ndarray, max_step: float = 0.5,
+                max_offset: float = 1.0, min_fragment: float = 0.05):
+    """
+    Remove position glitches by track continuity. Older inertial/LORAN/early-GPS positions
+    hold isolated spikes and short runs of garbage (e.g. longitude 0 for a few minutes, or
+    a position drifting near (0, 0) after an INS reset) that draw long straight lines.
+
+    The track is cut wherever two consecutive valid samples are further apart than
+    max_offset + max_step * (number of rows between them) degrees (great-circle-ish:
+    longitude is scaled by cos(latitude)). Rows are evenly spaced in time, so this is a
+    speed limit that allows for data gaps; with the default 0.5 deg per row it is far
+    above any aircraft's speed even at 60 s per row. Fragments holding less than
+    min_fragment of the flight's valid samples are taken to be glitches and set to NaN,
+    and where two kept fragments meet, the jump between them is left as a gap.
+
+    :return: Returns (lat, lon) copies with glitches set to NaN.
+    """
+    lat, lon = lat.copy(), lon.copy()
+    valid = np.flatnonzero(np.isfinite(lat) & np.isfinite(lon))
+    if valid.size < 3:
+        return lat, lon
+    vlat, vlon = lat[valid], lon[valid]
+    dlon = (np.diff(vlon) + 180.0) % 360.0 - 180.0
+    dist = np.hypot(np.diff(vlat), dlon * np.cos(np.deg2rad(0.5 * (vlat[1:] + vlat[:-1]))))
+    allowed = max_offset + max_step * np.diff(valid)
+    cuts = np.flatnonzero(dist > allowed) + 1
+    if cuts.size == 0:
+        return lat, lon
+    for start, end in zip(np.r_[0, cuts], np.r_[cuts, valid.size]):
+        if end - start < min_fragment * valid.size:
+            lat[valid[start:end]] = np.nan
+            lon[valid[start:end]] = np.nan
+        elif end < valid.size:
+            # keep this fragment, but don't draw the jump to whatever follows it
+            lat[valid[end - 1]] = np.nan
+            lon[valid[end - 1]] = np.nan
+    return lat, lon
+
+def flight_position(df: pd.DataFrame, min_valid: float = 0.5):
+    """
+    Pick a flight's latitude/longitude from whichever position variables were read.
+
+    Pairs are tried in POSITION_VARS order, and the first one with at least min_valid of
+    its samples valid is used. Early GPS (GLAT/GLON, ~1990-93) in particular can be
+    missing for most of a flight, in which case the inertial position is used instead. If
+    no pair reaches min_valid, the pair with the most valid samples is used.
+
+    Invalid samples become NaN, which bokeh draws as a gap: NaNs, latitudes beyond +/-90,
+    longitudes beyond +/-360 (fill values in older files), positions within 10 deg of
+    (0, 0), and latitude exactly equal to longitude (garbage in some 1980s files). Older
+    files record (0, 0) during GPS/INS dropouts and after the data system stopped (e.g.
+    SHEBA RF04's last 6 h), and an inertial position reset to (0, 0) drifts from there
+    for hours (e.g. SMILE, TTT); left in, these draw lines to the Gulf of Guinea. No NCAR
+    aircraft campaign has flown within 10 deg of (0, 0): every sample there through 2026
+    is one of these artifacts. Isolated jumps are then removed by _drop_jumps.
+
+    :param df: one flight's DataFrame, as read by util.flight_utils.
+    :param min_valid: fraction of valid samples a pair needs to be accepted outright.
+
+    :return: Returns (latitude, longitude) numpy arrays, or None if no position variables
+             were read.
+    """
+    best = None
+    for lat_name, lon_name in POSITION_VARS:
+        if lat_name not in df.columns or lon_name not in df.columns:
+            continue
+        lat = np.ravel(df[lat_name].to_numpy(dtype=float))
+        lon = np.ravel(df[lon_name].to_numpy(dtype=float))
+        with np.errstate(invalid='ignore'):
+            valid = (np.isfinite(lat) & np.isfinite(lon) & (np.abs(lat) <= 90.0)
+                     & (np.abs(lon) <= 360.0)
+                     & ~((np.abs(lat) < 10) & (np.abs((lon + 180.0) % 360.0 - 180.0) < 10))
+                     & (lat != lon))
+        lat = np.where(valid, lat, np.nan)
+        lon = np.where(valid, lon, np.nan)
+        fraction = valid.mean() if valid.size else 0.0
+        if fraction >= min_valid:
+            return _drop_jumps(lat, lon)
+        if best is None or fraction > best[2]:
+            best = (lat, lon, fraction)
+    return None if best is None else _drop_jumps(*best[:2])
+
+def _campaign_track(campaign: str, flights: dict[str, pd.DataFrame], to_xy, seam_jump: float):
+    """
+    Project every flight of a campaign and join them into one NaN-separated track, so the
+    whole campaign is a single bokeh glyph. One glyph per flight looks the same but makes
+    the saved notebook several times larger (every glyph carries its own model objects).
+
+    :return: Returns projected (x, y) arrays, or None if no flight had a position.
+    """
+    xs, ys = [], []
+    for flight, df in flights.items():
+        position = flight_position(df)
+        if position is None:
+            print(f"  skipping {campaign}/{flight}: no position variables were read")
+            continue
+        latitude, longitude = position
+        #  ARISTO2017 only had high-rate data, with a handful of bad lat/lons
+        if campaign == "ARISTO2017":
+            bad = latitude < 20
+            latitude = np.where(bad, np.nan, latitude)
+            longitude = np.where(bad, np.nan, longitude)
+        # project, putting the map's left/right seam at wrap_longitude. A seam at
+        # +75 deg has no flights on it, which centers the figure on the Pacific and
+        # keeps dateline-crossing flights continuous. Anything that does cross the
+        # seam is broken there rather than drawn straight across the figure.
+        x, y = to_xy(longitude, latitude)
+        x, y = _split_at_seam(x, y, seam_jump)
+        xs += [x, [np.nan]]
+        ys += [y, [np.nan]]
+    if not xs:
+        return None
+    # float32 is ~1 m precision even in Robinson's metres, and halves the data bokeh embeds
+    return (np.concatenate(xs[:-1]).astype(np.float32),
+            np.concatenate(ys[:-1]).astype(np.float32))
+
+def _map_figure(projection: str, wrap_longitude: float, width: int, height: int):
+    """
+    Make an empty map figure for plot_campaigns and friends.
+
+    :return: Returns (plot, to_xy, seam_jump).
+    """
+    # Mercator stretched the poles so badly that this polar-heavy dataset (lat -82 to +87)
+    # came out taller than it was wide. Both projections here roughly halve that aspect
+    # ratio: equirectangular plots lon/lat degrees directly, robinson is pseudocylindrical
+    # (plot coordinates are metres) and trades straight meridians for a rounder globe.
+    to_xy, x_bounds, y_bounds, seam_jump = _projector(projection, wrap_longitude)
+
+    # Neither projection's aspect ratio is locked to the figure's: bokeh maps each axis
+    # range onto the frame independently, so shrinking height squashes the map vertically
+    # rather than cropping it. Handy for fitting a wide figure, at the cost of geographic
+    # fidelity -- shapes stop being true to the projection.
+    plot = figure(width=width, height=height)
+
+    if projection == 'equirectangular':
+        plot.add_layout(Title(text="Longitude [Degrees]", align="center"), "below")
+        plot.add_layout(Title(text="Latitude [Degrees]", align="center"), "left")
+        # Tracks run from wrap_longitude - 360 to wrap_longitude, so tick values run below
+        # -180. Fold the labels back into [-180, 180] so e.g. 110 E reads as 110, not -250.
+        plot.xaxis.formatter = CustomJSTickFormatter(code="""
+            return (((tick + 180.0) % 360.0 + 360.0) % 360.0 - 180.0).toFixed(0);
+        """)
+        # Stop panning/zooming at one world width, so the map can't scroll into a second
+        # copy of the continents. Bounds are the seam meridian either side of the map.
+        plot.x_range.bounds = x_bounds
+        plot.y_range.bounds = y_bounds
+    else:
+        # Plot coordinates are projected metres, so the axes carry no readable lon/lat.
+        # add_basemap draws a graticule instead.
+        plot.xaxis.visible = False
+        plot.yaxis.visible = False
+        plot.xgrid.grid_line_color = None
+        plot.ygrid.grid_line_color = None
+        plot.outline_line_color = None
+        # Frame the whole globe rather than auto-ranging onto the tracks: cropping a
+        # pseudocylindrical cuts through its curved outline, and it would push the
+        # graticule labels at the poles and seam off the figure.
+        plot.x_range = Range1d(*x_bounds, bounds=x_bounds)
+        plot.y_range = Range1d(*y_bounds, bounds=y_bounds)
+    return plot, to_xy, seam_jump
+
+def plot_campaign_groups(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]],
+                         campaign_groups: dict[str,str], show_plot: bool = True,
+                         wrap_longitude: float = 50.0, projection: str = 'equirectangular',
+                         width: int = 1000, height: int = 450, palette: list[str] = None,
+                         line_width: float = 1, title: str = None):
+    """
+    Plot every campaign's flight tracks colored by group (e.g. decade or aircraft), with
+    one legend entry per group rather than per campaign. Useful when there are too many
+    campaigns for a readable legend.
+
+    :param all_campaign_dfs: campaign -> flight -> DataFrame, as read by util.flight_utils.
+    :param campaign_groups: campaign -> group label. Groups are colored, layered (later
+                            groups on top) and listed in the legend in order of first
+                            appearance in this dictionary. Campaigns missing from it are
+                            not plotted.
+    :param palette: colors for the groups, in order. Defaults to Category10.
+    :param title: optional figure title.
+    """
+    plot, to_xy, seam_jump = _map_figure(projection, wrap_longitude, width, height)
+    if title:
+        plot.title.text = title
+
+    groups = list(dict.fromkeys(campaign_groups.values()))
+    colors = palette or Category10[10]
+    for group, color in zip(groups, itertools.cycle(colors)):
+        xs, ys = [], []
+        for campaign, flights in all_campaign_dfs.items():
+            if campaign_groups.get(campaign) != group:
+                continue
+            track = _campaign_track(campaign, flights, to_xy, seam_jump)
+            if track is not None:
+                xs += [track[0], [np.nan]]
+                ys += [track[1], [np.nan]]
+        if xs:
+            plot.line(np.concatenate(xs).astype(np.float32),
+                      np.concatenate(ys).astype(np.float32), color=color,
+                      line_width=line_width, legend_label=group)
+
+    plot.legend.click_policy = 'hide'
+    plot.legend.label_text_font_size = '10px'
+    add_basemap(plot, projection=projection, wrap_longitude=wrap_longitude)
+    plot.add_layout(plot.legend[0], 'right')
+
+    if show_plot:
+        show(plot)
+    else:
+        return plot
+
 def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
     if mask is None:
         mask = np.ones(len(df))
@@ -386,102 +606,33 @@ def plot_track(df: pd.DataFrame, mask: pd.Series = None, title: str =''):
 def plot_campaigns(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], show_plot: bool = True,
                    wrap_longitude: float = 50.0,
                    projection: str = 'equirectangular',
-                   width: int = 1000, height: int = 450):
+                   width: int = 1000, height: int = 450,
+                   palette: list[str] = None, legend_ncols: int = 2,
+                   legend_font_size: str = '7px', title: str = None):
+    """
+    Plot every campaign's flight tracks on one map, one color and legend entry per campaign.
 
-    campaign = list(all_campaign_dfs.keys())[0]
+    :param palette: colors cycled through campaign by campaign. Defaults to Category10[8].
+    :param legend_ncols: number of legend columns.
+    :param legend_font_size: legend label font size, e.g. '7px'.
+    :param title: optional figure title.
+    """
+    plot, to_xy, seam_jump = _map_figure(projection, wrap_longitude, width, height)
+    if title:
+        plot.title.text = title
 
-    # Mercator stretched the poles so badly that this polar-heavy dataset (lat -82 to +87)
-    # came out taller than it was wide. Both projections here roughly halve that aspect
-    # ratio: equirectangular plots lon/lat degrees directly, robinson is pseudocylindrical
-    # (plot coordinates are metres) and trades straight meridians for a rounder globe.
-    to_xy, x_bounds, y_bounds, seam_jump = _projector(projection, wrap_longitude)
-
-    # Neither projection's aspect ratio is locked to the figure's: bokeh maps each axis
-    # range onto the frame independently, so shrinking height squashes the map vertically
-    # rather than cropping it. Handy for fitting a wide figure, at the cost of geographic
-    # fidelity -- shapes stop being true to the projection.
-    plot = figure(width=width, height=height)
-
-    if projection == 'equirectangular':
-        plot.add_layout(Title(text="Longitude [Degrees]", align="center"), "below")
-        plot.add_layout(Title(text="Latitude [Degrees]", align="center"), "left")
-        # Tracks run from wrap_longitude - 360 to wrap_longitude, so tick values run below
-        # -180. Fold the labels back into [-180, 180] so e.g. 110 E reads as 110, not -250.
-        plot.xaxis.formatter = CustomJSTickFormatter(code="""
-            return (((tick + 180.0) % 360.0 + 360.0) % 360.0 - 180.0).toFixed(0);
-        """)
-        # Stop panning/zooming at one world width, so the map can't scroll into a second
-        # copy of the continents. Bounds are the seam meridian either side of the map.
-        plot.x_range.bounds = x_bounds
-        plot.y_range.bounds = y_bounds
-    else:
-        # Plot coordinates are projected metres, so the axes carry no readable lon/lat.
-        # add_basemap draws a graticule instead.
-        plot.xaxis.visible = False
-        plot.yaxis.visible = False
-        plot.xgrid.grid_line_color = None
-        plot.ygrid.grid_line_color = None
-        plot.outline_line_color = None
-        # Frame the whole globe rather than auto-ranging onto the tracks: cropping a
-        # pseudocylindrical cuts through its curved outline, and it would push the
-        # graticule labels at the poles and seam off the figure.
-        plot.x_range = Range1d(*x_bounds, bounds=x_bounds)
-        plot.y_range = Range1d(*y_bounds, bounds=y_bounds)
-
-
-    colors = itertools.cycle(Category10[8])
-    for campaign in all_campaign_dfs.keys():
-        color=next(colors)
-        for flight, df in all_campaign_dfs[campaign].items():
-            # If GGLAT was read in, use it. Otherwise, default to GPS-corrected IRU lat/lon.
-            # NOTE: GPS-corrected IRU lat/lon has problems when flights cross the dateline.
-            if "GGLAT" in list(df.keys()):
-                latitude = df["GGLAT"].to_numpy().squeeze()
-                longitude = df["GGLON"].to_numpy().squeeze()
-            elif "LATC" in list(df.keys()):
-                latitude = df["LATC"].to_numpy().squeeze()
-                longitude = df["LONC"].to_numpy().squeeze()
-            elif "GLAT" in list(df.keys()):
-                # campaigns from the 1990s (e.g. INDOEX, 1999) name the GPS position
-                # GLAT/GLON rather than GGLAT/GGLON
-                latitude = df["GLAT"].to_numpy().squeeze()
-                longitude = df["GLON"].to_numpy().squeeze()
-            elif "LAT" in list(df.keys()):
-                # inertial (IRU) position, for campaigns whose GPS position is unreliable
-                # (e.g. FIB, 1992)
-                latitude = df["LAT"].to_numpy().squeeze()
-                longitude = df["LON"].to_numpy().squeeze()
-            else:
-                # Without this, latitude/longitude would still hold the previous flight's
-                # arrays and that track would quietly be drawn a second time.
-                print(f"  skipping {campaign}/{flight}: no position variables were read")
-                continue
-            # Drop positions of exactly (0, 0): older files record GPS/INS dropouts and
-            # periods after the data system stopped (e.g. SHEBA RF04's last 6 h) as zeros
-            # rather than as missing values, which would draw lines to the Gulf of Guinea.
-            null_island = (latitude == 0) & (longitude == 0)
-            if null_island.any():
-                latitude = latitude[~null_island]
-                longitude = longitude[~null_island]
-            #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
-            if campaign == "ARISTO2017":
-                mask = np.argwhere(latitude < 20)
-                latitude = np.delete(latitude,mask)
-                longitude = np.delete(longitude,mask)
-            # project, putting the map's left/right seam at wrap_longitude. A seam at
-            # +75 deg has no flights on it, which centers the figure on the Pacific and
-            # keeps dateline-crossing flights continuous. Anything that does cross the
-            # seam is broken there rather than drawn straight across the figure.
-            longitude, latitude = to_xy(longitude, latitude)
-            longitude, latitude = _split_at_seam(longitude, latitude, seam_jump)
-            # make that plot
-            plot.line(longitude,latitude, color=color, legend_label=campaign)
+    colors = itertools.cycle(palette or Category10[8])
+    for campaign, flights in all_campaign_dfs.items():
+        color = next(colors)
+        track = _campaign_track(campaign, flights, to_xy, seam_jump)
+        if track is not None:
+            plot.line(*track, color=color, legend_label=campaign)
 
     plot.legend.click_policy = 'hide'
-    plot.legend.label_text_font_size = '7px'
+    plot.legend.label_text_font_size = legend_font_size
     plot.legend.glyph_height = 8
     plot.legend.label_height = 8
-    plot.legend.ncols = 2
+    plot.legend.ncols = legend_ncols
     add_basemap(plot, projection=projection, wrap_longitude=wrap_longitude)
     plot.add_layout(plot.legend[0],'right')
 
@@ -495,100 +646,20 @@ def plot_campaigns_custom(all_campaign_dfs: dict[str,dict[str,pd.DataFrame]], sh
                           projection: str = 'equirectangular',
                           width: int = 1000, height: int = 550):
 
-    campaign = list(all_campaign_dfs.keys())[0]
-
-    # Mercator stretched the poles so badly that this polar-heavy dataset (lat -82 to +87)
-    # came out taller than it was wide. Both projections here roughly halve that aspect
-    # ratio: equirectangular plots lon/lat degrees directly, robinson is pseudocylindrical
-    # (plot coordinates are metres) and trades straight meridians for a rounder globe.
-    to_xy, x_bounds, y_bounds, seam_jump = _projector(projection, wrap_longitude)
-
-    # Neither projection's aspect ratio is locked to the figure's: bokeh maps each axis
-    # range onto the frame independently, so shrinking height squashes the map vertically
-    # rather than cropping it. Handy for fitting a wide figure, at the cost of geographic
-    # fidelity -- shapes stop being true to the projection.
-    plot = figure(width=width, height=height)
-
-    if projection == 'equirectangular':
-        plot.add_layout(Title(text="Longitude [Degrees]", align="center"), "below")
-        plot.add_layout(Title(text="Latitude [Degrees]", align="center"), "left")
-        # Tracks run from wrap_longitude - 360 to wrap_longitude, so tick values run below
-        # -180. Fold the labels back into [-180, 180] so e.g. 110 E reads as 110, not -250.
-        plot.xaxis.formatter = CustomJSTickFormatter(code="""
-            return (((tick + 180.0) % 360.0 + 360.0) % 360.0 - 180.0).toFixed(0);
-        """)
-        # Stop panning/zooming at one world width, so the map can't scroll into a second
-        # copy of the continents. Bounds are the seam meridian either side of the map.
-        plot.x_range.bounds = x_bounds
-        plot.y_range.bounds = y_bounds
-    else:
-        # Plot coordinates are projected metres, so the axes carry no readable lon/lat.
-        # add_basemap draws a graticule instead.
-        plot.xaxis.visible = False
-        plot.yaxis.visible = False
-        plot.xgrid.grid_line_color = None
-        plot.ygrid.grid_line_color = None
-        plot.outline_line_color = None
-        # Frame the whole globe rather than auto-ranging onto the tracks: cropping a
-        # pseudocylindrical cuts through its curved outline, and it would push the
-        # graticule labels at the poles and seam off the figure.
-        plot.x_range = Range1d(*x_bounds, bounds=x_bounds)
-        plot.y_range = Range1d(*y_bounds, bounds=y_bounds)
-
+    plot, to_xy, seam_jump = _map_figure(projection, wrap_longitude, width, height)
 
     #colors = itertools.cycle(Category10[10])
     colors = itertools.cycle(Category20[20])
-    for campaign in all_campaign_dfs.keys():
+    for campaign, flights in all_campaign_dfs.items():
         if campaign in ['SOCRATES','RICO','VOCALS','HIPPO-1','HIPPO-2','HIPPO-3','HIPPO-4','CAESAR','ORCAS','CSET']:
             color=next(colors)
             line_width=1.5
         else:
             color='gray'
             line_width=1
-        for flight, df in all_campaign_dfs[campaign].items():
-            # If GGLAT was read in, use it. Otherwise, default to GPS-corrected IRU lat/lon.
-            # NOTE: GPS-corrected IRU lat/lon has problems when flights cross the dateline.
-            if "GGLAT" in list(df.keys()):
-                latitude = df["GGLAT"].to_numpy().squeeze()
-                longitude = df["GGLON"].to_numpy().squeeze()
-            elif "LATC" in list(df.keys()):
-                latitude = df["LATC"].to_numpy().squeeze()
-                longitude = df["LONC"].to_numpy().squeeze()
-            elif "GLAT" in list(df.keys()):
-                # campaigns from the 1990s (e.g. INDOEX, 1999) name the GPS position
-                # GLAT/GLON rather than GGLAT/GGLON
-                latitude = df["GLAT"].to_numpy().squeeze()
-                longitude = df["GLON"].to_numpy().squeeze()
-            elif "LAT" in list(df.keys()):
-                # inertial (IRU) position, for campaigns whose GPS position is unreliable
-                # (e.g. FIB, 1992)
-                latitude = df["LAT"].to_numpy().squeeze()
-                longitude = df["LON"].to_numpy().squeeze()
-            else:
-                # Without this, latitude/longitude would still hold the previous flight's
-                # arrays and that track would quietly be drawn a second time.
-                print(f"  skipping {campaign}/{flight}: no position variables were read")
-                continue
-            # Drop positions of exactly (0, 0): older files record GPS/INS dropouts and
-            # periods after the data system stopped (e.g. SHEBA RF04's last 6 h) as zeros
-            # rather than as missing values, which would draw lines to the Gulf of Guinea.
-            null_island = (latitude == 0) & (longitude == 0)
-            if null_island.any():
-                latitude = latitude[~null_island]
-                longitude = longitude[~null_island]
-            #  ARISTO2017 only had high-rate data, with a handful of lat/lons of 0,0
-            if campaign == "ARISTO2017":
-                mask = np.argwhere(latitude < 20)
-                latitude = np.delete(latitude,mask)
-                longitude = np.delete(longitude,mask)
-            # project, putting the map's left/right seam at wrap_longitude. A seam at
-            # +75 deg has no flights on it, which centers the figure on the Pacific and
-            # keeps dateline-crossing flights continuous. Anything that does cross the
-            # seam is broken there rather than drawn straight across the figure.
-            longitude, latitude = to_xy(longitude, latitude)
-            longitude, latitude = _split_at_seam(longitude, latitude, seam_jump)
-            # make that plot
-            plot.line(longitude,latitude, color=color, legend_label=campaign,line_width=line_width)
+        track = _campaign_track(campaign, flights, to_xy, seam_jump)
+        if track is not None:
+            plot.line(*track, color=color, legend_label=campaign, line_width=line_width)
 
     plot.legend.click_policy = 'hide'
     plot.legend.label_text_font_size = '10px'
