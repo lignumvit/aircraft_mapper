@@ -4,9 +4,11 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import re
 from datetime import datetime, timedelta
 from fnmatch import fnmatch
 from typing import Iterable
+from util import genpro_utils, dap_utils
 
 # vars_to_read is the default set of variables that get read when calling read_nc below when
 # variables are not specified (i.e. when called like "utils.read_nc(netcdf_obj)"). 
@@ -54,6 +56,9 @@ def find_flight_paths(location) -> list[str]:
                      (e.g. ".../HRT/NetCDF/RF*", to leave out preflight or ferry files), or a
                      list of either, for campaigns whose flights are split over several
                      directories (several aircraft, or LRT and HRT holding different flights).
+                     A single file can also be given. A glob pattern also matches GENPRO
+                     files (see util.genpro_utils), which have no file name extension, and
+                     KOFSE's DAP position listings (see util.dap_utils).
 
     :return: Returns a list of file paths, directory by directory in the order given.
              A missing or unreadable directory raises OSError.
@@ -63,7 +68,11 @@ def find_flight_paths(location) -> list[str]:
     for loc in map(str, locations):
         if any(c in loc for c in '*?['):
             paths.extend(sorted(p for p in glob.glob(loc)
-                                if fnmatch(p, "*.nc") or fnmatch(p, "*.cdf")))
+                                if fnmatch(p, "*.nc") or fnmatch(p, "*.cdf")
+                                or (os.path.isfile(p) and (genpro_utils.genpro_format(p)
+                                                           or dap_utils.is_dap(p)))))
+        elif os.path.isfile(loc):
+            paths.append(loc)
         else:
             paths.extend(os.path.join(loc, fname) for fname in find_flight_fnames(loc))
     return paths
@@ -256,6 +265,64 @@ def thinning_stride(nc: netCDF4._netCDF4.Dataset, df: pd.DataFrame, period_s: fl
     rows_per_second = len(df) / len(nc.dimensions['Time'])
     return max(1, round(period_s * rows_per_second))
 
+def flight_time_span(nc: netCDF4._netCDF4.Dataset, file_path: str = None):
+    """
+    flight_time_span returns the first and last time of a flight file.
+
+    Times come from the Time variable (seconds since the date in its units), or base_time +
+    time_offset in older files, ignoring garbage times. RAF's archive file names also give
+    them, e.g. RF01.19850605.132000_155450.PNI.nc (an end before the start means the flight
+    crossed midnight). Either can be wrong -- a few files hold scrambled times, and a few
+    names placeholder ones (e.g. ..._010101) -- and an error almost always lengthens the
+    span, so when both are available the shorter span is returned.
+
+    :return: Returns (start, end) as datetimes, or (None, None) if they can't be read.
+    """
+    spans = []
+    m = re.search(r'\.(\d{8})\.(\d{6})_(\d{6})', os.path.basename(file_path or ''))
+    if m:
+        try:
+            start = datetime.strptime(m.group(1) + m.group(2), '%Y%m%d%H%M%S')
+            end = datetime.strptime(m.group(1) + m.group(3), '%Y%m%d%H%M%S')
+            spans.append((start, end + timedelta(days=1) if end < start else end))
+        except ValueError:
+            pass
+    try:
+        time = np.ma.filled(np.ma.asarray(nc['Time'][:], dtype=float), np.nan)
+        base = netCDF4.num2date(0, nc['Time'].units, only_use_cftime_datetimes=False,
+                                only_use_python_datetimes=True)
+        base = datetime(*base.timetuple()[:6])   # plain, timezone-naive UTC
+    except Exception:
+        try:
+            # older conventions: Unix-epoch base_time plus seconds of time_offset
+            time = np.ma.filled(np.ma.asarray(nc['time_offset'][:], dtype=float), np.nan)
+            base = datetime(1970, 1, 1) + timedelta(seconds=float(nc['base_time'][...]))
+        except Exception:
+            time = base = None
+    if base is not None:
+        # genpro_utils.time_span keeps only times that run like a clock, which drops fill
+        # values and corrupt records
+        span = genpro_utils.time_span(base, time)
+        if span[0] is not None:
+            spans.append(span)
+    if not spans:
+        return None, None
+    return min(spans, key=lambda span: span[1] - span[0])
+
+def flight_type(file_path: str) -> str:
+    """
+    flight_type reads a flight's type from RAF's file naming: 'research' (RF01, ...rf01.nc),
+    'ferry' (FF), 'test' (TF), or 'unknown'. The file name is tried first, then the name of
+    the directory holding it (GENPRO files sit in directories named after the flight).
+    """
+    kinds = {'R': 'research', 'F': 'ferry', 'T': 'test'}
+    parent, fname = os.path.split(file_path)
+    for name in (fname, os.path.basename(parent)):
+        m = re.search(r'(?i)(r|f|t)f\d\d', name)
+        if m:
+            return kinds[m.group(1).upper()]
+    return 'unknown'
+
 def read_all_flights(data_dir: str, 
                      field_campaigns: list[str], 
                      read_vars: list[str] = vars_to_read,
@@ -305,7 +372,9 @@ def read_all_flights_from_dirs(campaign_dirs: dict[str,str],
                           {'FIB': ['LAT','LON']} to read the inertial position).
 
     :return: Returns a dictionary of dictionaries of Pandas DataFrames, keyed by field
-             campaign and then by flight file name.
+             campaign and then by flight file name. Each DataFrame's attrs hold 'path' (the
+             file it was read from), 'start' and 'end' (datetimes of its first and last
+             sample, or None) and 'flight_type' (see flight_type).
     """
     if period_s < 0:
         raise ValueError(f"period_s must be >= 0, got {period_s}")
@@ -323,21 +392,36 @@ def read_all_flights_from_dirs(campaign_dirs: dict[str,str],
             print(f"  skipping {campaign}: cannot read {e.filename or campaign_dir} ({e.strerror})")
             continue
         if not flight_paths and skip_missing:
-            print(f"  skipping {campaign}: no *.nc files in {campaign_dir}")
+            print(f"  skipping {campaign}: no flight files in {campaign_dir}")
             continue
         for flight_path in flight_paths:
-            flight_nc = open_flight_nc(flight_path)
-            df = read_flight_nc(flight_nc, campaign_read_vars)
-            stride = thinning_stride(flight_nc, df, period_s)
-            flight_nc.close()
-            if stride > 1:
-                # reset the index so the thinned frame looks like a natively lower-rate
-                # read rather than one with gaps in its index
-                df = df.iloc[::stride].reset_index(drop=True)
-            # Key by file name. Flights of a campaign spread over several directories
-            # (e.g. one per aircraft) can share a file name, so fall back to the full path.
-            fname = os.path.basename(flight_path)
-            flight_dict[flight_path if fname in flight_dict else fname] = df
+            if dap_utils.is_dap(flight_path):
+                # text position listings (KOFSE), one or more flights each
+                segments = dap_utils.read_dap_flights(flight_path, campaign_read_vars, period_s)
+            elif not (fnmatch(flight_path, "*.nc") or fnmatch(flight_path, "*.cdf")):
+                # GENPRO files hold one or more flight segments each
+                segments = genpro_utils.read_genpro_flights(flight_path, campaign_read_vars,
+                                                            period_s)
+            else:
+                flight_nc = open_flight_nc(flight_path)
+                df = read_flight_nc(flight_nc, campaign_read_vars)
+                stride = thinning_stride(flight_nc, df, period_s)
+                start, end = flight_time_span(flight_nc, flight_path)
+                flight_nc.close()
+                if stride > 1:
+                    # reset the index so the thinned frame looks like a natively lower-rate
+                    # read rather than one with gaps in its index
+                    df = df.iloc[::stride].reset_index(drop=True)
+                df.attrs['start'], df.attrs['end'] = start, end
+                segments = {os.path.basename(flight_path): df}
+            for fname, df in segments.items():
+                # Record where the flight came from, for reports (util.campaign_report)
+                df.attrs['path'] = flight_path
+                df.attrs['flight_type'] = flight_type(flight_path)
+                # Key by file name. Flights of a campaign spread over several directories
+                # (e.g. one per aircraft) can share a file name, so fall back to the full path.
+                flight_dict[flight_path + fname[len(os.path.basename(flight_path)):]
+                            if fname in flight_dict else fname] = df
         all_campaign_nc[campaign] = flight_dict
     return all_campaign_nc
 

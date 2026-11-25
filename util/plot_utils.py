@@ -355,8 +355,9 @@ def add_basemap(plot, projection: str = 'equirectangular', wrap_longitude: float
 #   LAT/LON      inertial position (1990s), or the only position in 1970s-early 80s data
 #   ALAT/ALON    inertial position (1980s)
 #   CLAT/CLON    LORAN-C position (1980s)
+#   VLAT/VLON    VLF/Omega navigation position (1970s GENPRO files; VLONG there)
 POSITION_VARS = (('GGLAT', 'GGLON'), ('LATC', 'LONC'), ('XLATC', 'XLONC'), ('GLAT', 'GLON'),
-                 ('LAT', 'LON'), ('ALAT', 'ALON'), ('CLAT', 'CLON'))
+                 ('LAT', 'LON'), ('ALAT', 'ALON'), ('CLAT', 'CLON'), ('VLAT', 'VLON'))
 
 def _drop_jumps(lat: np.ndarray, lon: np.ndarray, max_step: float = 0.5,
                 max_offset: float = 1.0, min_fragment: float = 0.05):
